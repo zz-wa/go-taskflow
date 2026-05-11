@@ -1,10 +1,10 @@
-package model
+package job
 
 const (
-	Pending string = "pending"
-	Running string = "running"
-	Success string = "success"
-	Failed  string = "failed"
+	StatusPending string = "pending"
+	StatusRunning string = "running"
+	StatusSuccess string = "success"
+	StatusFailed  string = "failed"
 )
 
 type Job struct {
@@ -16,6 +16,3 @@ type Job struct {
 	MaxRetries int    `json:"maxRetries"`
 	Error      string `json:"error,omitempty"`
 }
-
-var JobStore map[string]*Job
-var JobQueue chan *Job
