@@ -84,11 +84,12 @@ func (p *Pool) HandleFail(j *job.Job, err error) {
 	j.RetryTimes++
 	j.Error = err.Error()
 
-	if j.RetryTimes < p.cfg.MaxRetries {
-		p.store.UpdateStatus(j.ID, job.StatusPending)
-		p.queue <- j
+	retry, ok := p.store.RecordFailed(j.ID, err)
+	if !ok {
 		return
 	}
-	p.store.UpdateStatus(j.ID, job.StatusFailed)
+	if retry {
+		p.queue <- j
+	}
 	p.jobWg.Done()
 }

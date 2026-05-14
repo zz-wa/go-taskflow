@@ -7,6 +7,7 @@ import (
 type Store interface {
 	Put(j *Job)
 	UpdateStatus(id, status string)
+	RecordFailed(id string, err error) (ShouldRetry bool, ok bool)
 	GetStatus(id string) string
 	Get(id string) (Job, bool)
 }
@@ -39,9 +40,11 @@ func (s *MemStore) UpdateStatus(id, status string) {
 func (s *MemStore) GetStatus(id string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	if j, ok := s.jobs[id]; ok {
 		return j.Status
 	}
+
 	return ""
 }
 
@@ -55,4 +58,27 @@ func (s *MemStore) Get(id string) (Job, bool) {
 	}
 
 	return *j, true
+}
+
+func (s *MemStore) RecordFailed(id string, err error) (ShouldRetry bool, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.jobs[id]; ok {
+		return false, false
+	}
+	retry := false
+
+	s.jobs[id].RetryTimes++
+	s.jobs[id].Error = err.Error()
+
+	if s.jobs[id].RetryTimes > s.jobs[id].RetryTimes {
+		s.UpdateStatus(id, StatusPending)
+		retry = true
+	} else {
+		s.UpdateStatus(id, StatusFailed)
+		retry = false
+		return retry, true
+	}
+	return retry, true
 }
