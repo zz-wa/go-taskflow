@@ -81,8 +81,6 @@ func (p *Pool) runWorker(id int) {
 }
 
 func (p *Pool) HandleFail(j *job.Job, err error) {
-	j.RetryTimes++
-	j.Error = err.Error()
 
 	retry, ok := p.store.RecordFailed(j.ID, err)
 	if !ok {
