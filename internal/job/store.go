@@ -8,6 +8,7 @@ type Store interface {
 	Put(j *Job)
 	UpdateStatus(id, status string)
 	GetStatus(id string) string
+	Get(id string) (Job, bool)
 }
 
 type MemStore struct {
@@ -42,4 +43,16 @@ func (s *MemStore) GetStatus(id string) string {
 		return j.Status
 	}
 	return ""
+}
+
+func (s *MemStore) Get(id string) (Job, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	j, ok := s.jobs[id]
+	if !ok || j == nil {
+		return Job{}, false
+	}
+
+	return *j, true
 }
