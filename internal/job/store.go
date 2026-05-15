@@ -64,21 +64,19 @@ func (s *MemStore) RecordFailed(id string, err error) (ShouldRetry bool, ok bool
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.jobs[id]; ok {
+	j, ok := s.jobs[id]
+	if !ok {
 		return false, false
 	}
-	retry := false
 
-	s.jobs[id].RetryTimes++
-	s.jobs[id].Error = err.Error()
+	j.RetryTimes++
+	j.Error = err.Error()
 
-	if s.jobs[id].RetryTimes > s.jobs[id].RetryTimes {
-		s.UpdateStatus(id, StatusPending)
-		retry = true
-	} else {
-		s.UpdateStatus(id, StatusFailed)
-		retry = false
-		return retry, true
+	if j.RetryTimes < j.MaxRetries {
+		j.Status = StatusPending
+		return true, true
 	}
-	return retry, true
+	j.Status = StatusFailed
+
+	return false, true
 }

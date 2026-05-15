@@ -1,17 +1,20 @@
 package executor
 
 import (
+	"context"
 	"errors"
 	"go-taskflow/internal/job"
+	"time"
 )
 
 type Executor interface {
-	Execute(j *job.Job) error
+	Execute(ctx context.Context, j *job.Job) error
 }
 
 type Default struct{}
 
-func (Default) Execute(j *job.Job) error {
+func (Default) Execute(ctx context.Context, j *job.Job) error {
+
 	switch j.Payload {
 	case "success":
 		return nil
@@ -22,6 +25,15 @@ func (Default) Execute(j *job.Job) error {
 			return errors.New("job retry failed")
 		}
 		return nil
+	case "timeout":
+		select {
+		case <-time.After(5 * time.Second):
+			return nil
+
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
 	}
 	return nil
 }

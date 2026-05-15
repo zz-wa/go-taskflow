@@ -5,6 +5,7 @@ const (
 	StatusRunning string = "running"
 	StatusSuccess string = "success"
 	StatusFailed  string = "failed"
+	Timeout       string = "timeout"
 )
 
 type Job struct {

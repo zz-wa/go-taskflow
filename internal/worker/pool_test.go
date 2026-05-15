@@ -4,6 +4,7 @@ import (
 	"go-taskflow/internal/executor"
 	"go-taskflow/internal/job"
 	"testing"
+	"time"
 )
 
 func TestPoolExecuteJobsWithRetry(t *testing.T) {
@@ -35,6 +36,13 @@ func TestPoolExecuteJobsWithRetry(t *testing.T) {
 			wantRetryTimes: 2,
 			wantError:      true,
 		},
+		{
+			name:           "timeout job",
+			payload:        "timeout",
+			wantStatus:     job.StatusFailed,
+			wantRetryTimes: 3,
+			wantError:      true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -46,6 +54,7 @@ func TestPoolExecuteJobsWithRetry(t *testing.T) {
 					Workers:    3,
 					QueueSize:  100,
 					MaxRetries: 3,
+					JobTimeout: 500 * time.Millisecond,
 				},
 				executor.Default{},
 				store,

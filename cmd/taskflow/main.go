@@ -5,12 +5,13 @@ import (
 	"go-taskflow/internal/executor"
 	"go-taskflow/internal/job"
 	"go-taskflow/internal/worker"
+	"time"
 )
 
 func main() {
 	store := job.NewMemStore()
 
-	pool := worker.New(worker.Config{Workers: 3, QueueSize: 100, MaxRetries: 3}, executor.Default{}, store)
+	pool := worker.New(worker.Config{Workers: 3, QueueSize: 100, MaxRetries: 3, JobTimeout: 500 * time.Millisecond}, executor.Default{}, store)
 
 	pool.Start()
 

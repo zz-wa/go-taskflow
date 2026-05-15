@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"fmt"
 	"go-taskflow/internal/executor"
 	"go-taskflow/internal/job"
@@ -14,6 +15,7 @@ type Config struct {
 	Workers    int
 	QueueSize  int
 	MaxRetries int
+	JobTimeout time.Duration
 }
 
 type Pool struct {
@@ -64,30 +66,41 @@ func (p *Pool) Shutdown() {
 
 func (p *Pool) runWorker(id int) {
 	defer p.workerWg.Done()
+
 	for j := range p.queue {
 		fmt.Printf("worker - %d begin job %s\n", id, j.ID)
 		p.store.UpdateStatus(j.ID, job.StatusRunning)
 
-		time.Sleep(1 * time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), p.cfg.JobTimeout)
 
-		if err := p.exec.Execute(j); err != nil {
+		err := p.exec.Execute(ctx, j)
+
+		cancel()
+
+		if err != nil {
 			p.HandleFail(j, err)
 			continue
+
 		}
+
 		p.store.UpdateStatus(j.ID, job.StatusSuccess)
 		p.jobWg.Done()
 		fmt.Printf("worker - %d success job %s\n", id, j.ID)
 	}
+
 }
 
 func (p *Pool) HandleFail(j *job.Job, err error) {
 
 	retry, ok := p.store.RecordFailed(j.ID, err)
 	if !ok {
+		p.jobWg.Done()
 		return
 	}
 	if retry {
 		p.queue <- j
+		return
 	}
+
 	p.jobWg.Done()
 }
