@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"errors"
 	"go-taskflow/internal/executor"
 	"go-taskflow/internal/job"
 	"testing"
@@ -62,8 +63,10 @@ func TestPoolExecuteJobsWithRetry(t *testing.T) {
 
 			pool.Start()
 
-			id := pool.Submit("test", tt.payload)
-
+			id, err := pool.Submit("test", tt.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
 			pool.Shutdown()
 
 			got, ok := store.Get(id)
@@ -87,5 +90,55 @@ func TestPoolExecuteJobsWithRetry(t *testing.T) {
 				t.Fatalf("error = %q, want empty", got.Error)
 			}
 		})
+	}
+}
+
+func TestRetryNotBlockWhenQueueFull(t *testing.T) {
+	store := job.NewMemStore()
+	pool := New(Config{
+		Workers:    1,
+		QueueSize:  1,
+		MaxRetries: 3,
+		JobTimeout: 500 * time.Millisecond,
+	}, executor.Default{}, store)
+
+	j := &job.Job{
+		ID:         "retry_job",
+		JobType:    "test",
+		Payload:    "fail",
+		Status:     job.StatusPending,
+		MaxRetries: 3,
+	}
+	store.Put(j)
+	pool.jobWg.Add(1)
+
+	pool.queue <- &job.Job{ID: "blocker"}
+
+	done := make(chan struct{})
+	go func() {
+		pool.HandleFail(j, errors.New("execute failed"))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("shutdown blocked,retry  maybe stuck")
+	}
+
+	got, ok := store.Get(j.ID)
+
+	if !ok {
+		t.Fatal("job is not found")
+	}
+	if got.Status != job.StatusFailed {
+		t.Fatalf("status = %s, want %s", got.Status, job.StatusFailed)
+	}
+
+	if got.Error == "" {
+		t.Fatal("error is empty,want non-empty")
+	}
+	if got.RetryTimes != 1 {
+		t.Fatalf("retryTimes = %d, want %d", got.RetryTimes, 1)
 	}
 }

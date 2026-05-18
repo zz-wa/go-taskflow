@@ -10,6 +10,8 @@ type Store interface {
 	RecordFailed(id string, err error) (ShouldRetry bool, ok bool)
 	GetStatus(id string) string
 	Get(id string) (Job, bool)
+	Delete(id string)
+	MarkFailed(id string, err error) bool
 }
 
 type MemStore struct {
@@ -79,4 +81,22 @@ func (s *MemStore) RecordFailed(id string, err error) (ShouldRetry bool, ok bool
 	j.Status = StatusFailed
 
 	return false, true
+}
+
+func (s *MemStore) Delete(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.jobs, id)
+}
+
+func (s *MemStore) MarkFailed(id string, err error) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		return false
+	}
+	j.Status = StatusFailed
+	j.Error = err.Error()
+	return true
 }

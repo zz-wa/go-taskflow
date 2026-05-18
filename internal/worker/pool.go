@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go-taskflow/internal/executor"
 	"go-taskflow/internal/job"
@@ -17,6 +18,8 @@ type Config struct {
 	MaxRetries int
 	JobTimeout time.Duration
 }
+
+var ErrQueueFull = errors.New("queue is full")
 
 type Pool struct {
 	cfg      Config
@@ -43,7 +46,7 @@ func (p *Pool) Start() {
 	}
 }
 
-func (p *Pool) Submit(jobType, payload string) string {
+func (p *Pool) Submit(jobType, payload string) (string, error) {
 	j := &job.Job{
 		ID:         uuid.New().String(),
 		JobType:    jobType,
@@ -53,9 +56,15 @@ func (p *Pool) Submit(jobType, payload string) string {
 	}
 	p.store.Put(j)
 	p.jobWg.Add(1)
-	p.queue <- j
+	select {
+	case p.queue <- j:
+		return j.ID, nil
+	default:
+		p.jobWg.Done()
+		p.store.Delete(j.ID)
+		return "", ErrQueueFull
+	}
 
-	return j.ID
 }
 
 func (p *Pool) Shutdown() {
@@ -98,8 +107,14 @@ func (p *Pool) HandleFail(j *job.Job, err error) {
 		return
 	}
 	if retry {
-		p.queue <- j
-		return
+		select {
+		case p.queue <- j:
+			return
+		default:
+			p.store.MarkFailed(j.ID, ErrQueueFull)
+			p.jobWg.Done()
+			return
+		}
 	}
 
 	p.jobWg.Done()
