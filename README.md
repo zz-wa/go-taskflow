@@ -21,7 +21,10 @@ go-taskflow 是一个用 Go 实现的轻量级异步任务队列 demo。
 
 ## 当前功能
 
-- 提交任务（`Pool.Submit`），返回 job ID
+- 通过 HTTP 提交任务，返回 job ID
+- 通过 HTTP 查询任务状态
+- 提供健康检查接口
+- 提交任务（`Pool.Submit`），返回 job ID；队列满时返回错误
 - 使用带缓冲 channel 作为任务队列
 - 使用固定数量 worker 构成 worker pool
 - 支持单次 job 执行超时控制（`JobTimeout`）
@@ -31,13 +34,14 @@ go-taskflow 是一个用 Go 实现的轻量级异步任务队列 demo。
   - `success`
   - `failed`
 - 失败自动重试，最多重试 `MaxRetries` 次
+- retry 重新入队时使用非阻塞写入，队列满则直接标记任务失败，避免 worker 卡死
 - 超时任务复用统一失败处理流程：执行失败 → retry → 超过重试上限后 failed
 - 通过 `Executor` 接口模拟不同任务执行结果（成功 / 失败 / 多次重试后成功 / 超时）
 - `Executor.Execute` 接收 `context.Context`，可以响应 timeout / cancel
 - 通过 `Store` 接口隔离任务存储，当前实现是内存版 `MemStore`
 - 使用 `sync.RWMutex` 保证任务状态读写的并发安全
-- 使用 `sync.WaitGroup` 实现 graceful shutdown：等所有任务落地 → 关闭 channel → 等所有 worker 退出
-- 使用表驱动测试覆盖 success / fail / flaky / timeout 四种执行路径
+- 使用 `sync.WaitGroup` 实现 graceful shutdown：停止 HTTP 服务 → 等所有任务落地 → 关闭 channel → 等所有 worker 退出
+- 使用表驱动测试覆盖 success / fail / flaky / timeout 四种执行路径，并覆盖 HTTP health 与 retry 队列满场景
 
 ## 项目结构
 
@@ -52,6 +56,12 @@ go-taskflow
 │   ├── job
 │   │   ├── job.go               # Job 结构体 + 状态常量
 │   │   └── store.go             # Store 接口 + MemStore 内存实现
+│   ├── transport
+│   │   └── http
+│   │       └── server
+│   │           ├── router.go     # HTTP 路由
+│   │           ├── server.go     # HTTP handler
+│   │           └── server_test.go
 │   └── worker
 │       ├── pool.go              # Pool 类型（worker 池 + 调度 + 重试 + timeout）
 │       └── pool_test.go         # worker pool 表驱动测试
@@ -70,26 +80,72 @@ go-taskflow
 go run ./cmd/taskflow
 ```
 
+服务默认监听：
+
+```text
+http://localhost:8080
+```
+
 带数据竞争检测器：
 
 ```bash
 go run -race ./cmd/taskflow
 ```
 
-预期输出（worker 编号、UUID 每次不同）：
+### HTTP API
 
-```
-worker - 0 begin job 5a10ab49-...
-worker - 1 begin job cf30f1e2-...
-worker - 2 begin job e450d208-...
-worker - 1 success job cf30f1e2-...
-...
-job Status success
-job Status failed
-job Status success
+健康检查：
+
+```bash
+curl http://localhost:8080/health
 ```
 
-三个 job 分别演示：
+响应：
+
+```json
+{"status":"ok"}
+```
+
+提交任务：
+
+```bash
+curl -X POST http://localhost:8080/submit \
+  -H 'Content-Type: application/json' \
+  -d '{"jobtype":"test","payload":"success"}'
+```
+
+响应状态码为 `202 Accepted`，表示任务已进入队列等待异步执行：
+
+```json
+{"id":"<job-id>","status":"pending"}
+```
+
+查询任务：
+
+```bash
+curl http://localhost:8080/jobs/<job-id>
+```
+
+响应示例：
+
+```json
+{
+  "id": "<job-id>",
+  "jobtype": "test",
+  "payload": "success",
+  "status": "success",
+  "retryTimes": 0,
+  "maxRetries": 3
+}
+```
+
+队列满时，提交接口返回 `503 Service Unavailable`：
+
+```json
+{"error":"queue is full"}
+```
+
+当前 `executor.Default` 用 `payload` 模拟不同任务行为：
 
 | Payload   | 行为                                     | 最终状态 |
 | --------- | ---------------------------------------- | -------- |
@@ -98,7 +154,7 @@ job Status success
 | `flaky`   | 前 `MaxRetries-1` 次失败，最后一次成功    | `success` |
 | `timeout` | 每次执行都超过 `JobTimeout`，最终失败      | `failed`  |
 
-当前 `main.go` 只提交了 `success` / `fail` / `flaky` 三种任务；`timeout` 路径主要在测试里覆盖。
+按 `Ctrl+C` 退出服务时，程序会先关闭 HTTP server，不再接收新请求，然后等待队列中已有任务处理完成，最后关闭 worker pool。
 
 ## 测试
 
@@ -139,6 +195,20 @@ func New(cfg Config, exec executor.Executor, store job.Store) *Pool
 
 ### 3. Graceful shutdown 的两阶段等待
 
+`main.go` 先处理进程信号和 HTTP server 生命周期：
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+if err := httpServer.Shutdown(ctx); err != nil {
+    log.Fatal(err)
+}
+pool.Shutdown()
+```
+
+`Pool.Shutdown` 再处理任务队列和 worker 生命周期：
+
 ```go
 func (p *Pool) Shutdown() {
     p.jobWg.Wait()      // 1. 等所有 in-flight job（包括 retry）到达终态
@@ -149,11 +219,30 @@ func (p *Pool) Shutdown() {
 
 `jobWg` 数"还在飞的 job 数"，`workerWg` 数"worker goroutine 数"。两个 WaitGroup 分别负责不同的生命周期事件——这是 worker pool graceful shutdown 的通用模板。
 
-### 4. retry 不重复计数
+### 4. 队列满时快速失败
 
-job 在重试时**不调用 `jobWg.Done()`**——因为它还 in-flight。只有到达终态（Success / 最终 Failed）才 `Done`。这样 `jobWg.Wait()` 能正确等到所有 retry 跑完。
+`Pool.Submit` 使用非阻塞 channel 写入：
 
-### 5. 每次 job 执行都有独立 timeout
+```go
+select {
+case p.queue <- j:
+    return j.ID, nil
+default:
+    p.jobWg.Done()
+    p.store.Delete(j.ID)
+    return "", ErrQueueFull
+}
+```
+
+这样 HTTP 请求不会因为队列满而一直挂住，而是直接返回 `503`。
+
+retry 重新入队时也使用非阻塞写入。如果队列满，任务会被标记为 `failed` 并结束，避免所有 worker 都阻塞在重试入队上。
+
+### 5. retry 不重复计数
+
+job 在重试时**不调用 `jobWg.Done()`**——因为它还 in-flight。只有到达终态（Success / 最终 Failed / retry 队列满）才 `Done`。这样 `jobWg.Wait()` 能正确等到所有 retry 跑完。
+
+### 6. 每次 job 执行都有独立 timeout
 
 `worker` 不负责模拟任务耗时，只负责给每次执行创建带超时的 `context`：
 
@@ -181,11 +270,10 @@ case <-ctx.Done():
 这是个学习中的项目，已经识别出但还没动手的点：
 
 - [ ] 没有结构化日志，目前用 `fmt.Printf`
-- [ ] 没有监听 SIGINT/SIGTERM 信号优雅退出
 - [ ] `MemStore` 只是内存版，重启数据丢失
 - [ ] `Pool.HandleFail` 应该是私有方法（`handleFail`）
-- [ ] `main.go` 还没有演示 `timeout` payload
 - [ ] 还没有外部取消整个 Pool 的机制，目前只支持单次 job timeout
+- [ ] HTTP handler 测试还可以继续补齐 submit / get / queue full 等路径
 - [ ] 没有 metrics / 可观测性
 
 ## 依赖
